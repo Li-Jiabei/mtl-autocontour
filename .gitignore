@@ -1,0 +1,20 @@
+# Data and outputs — don't commit
+*.byu
+*.vtk
+*.h5
+*.nii
+*.nii.gz
+auto_contours/
+final_vtk/
+cut_output/
+*_contour_ids.txt
+*.log
+nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.bak
+
+# OS
+.DS_Store
