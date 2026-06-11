@@ -59,6 +59,16 @@ python3 -c "import sys; \
 
 `[KeOps] ... CUDA libraries not found ... CPU only` is fine (just slower).
 
+## Template building (pygalmesh not required)
+
+`build_group_templates.py` calls `SurfaceTemplate.computeTemplate`, whose import
+chain references `pygalmesh` (CGAL) — painful to install without sudo. The script
+avoids it: it (1) injects a stub `pygalmesh` module so the import succeeds, and
+(2) initialises the template from one of your own surfaces instead of an
+auto-generated pygalmesh shape. So **no pygalmesh install is needed.** The
+"could not import Pygalmesh functions" warning is harmless. `register_best_of_3.py`
+and `finalize_cuts.py` never touch pygalmesh.
+
 ## GPU
 
 keops uses CUDA automatically when available — roughly 100x faster than CPU.

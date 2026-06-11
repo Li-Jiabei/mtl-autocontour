@@ -5,35 +5,48 @@ Automatically place the cutting contour on medial-temporal-lobe surfaces
 regions — replacing the manual contour tracing previously done by hand in
 ParaView.
 
-The method: an **LDDMM population template** is registered onto each surface
-(using `py-lddmm`), the template's boundary loop is **transferred** onto the
-surface, and the surface is **cut along that transferred contour, routed on the
-mesh**. On validation data the transferred contour matched manual tracings to
-sub-millimetre accuracy.
+**Method:** shape-stratified **LDDMM template-boundary transfer**. Surfaces are
+grouped by shape (narrow / wide / weird); one averaged template is built per
+group; each new surface is registered to **all** group templates and the
+best-fitting one is kept (best-of-3); that template's boundary is transferred
+onto the surface and the surface is **cut along it, routed on the mesh**.
+
+**Validation:** on 78 BIOCARD CON_LH surfaces, the automatic cut agreed with
+manual hand cuts on a **median 93% of the surface** (mean 91%), with only **1/78
+flagged** as a degenerate cut. The smaller side of each cut was 45–48%, matching
+the 35–50% range measured across 198 manual cuts.
 
 ---
 
-## How it works (two stages)
+## Pipeline (3 stages)
 
-```
-  surface (.byu)
-        │
-        │  [Stage 1 — needs py-lddmm, run on the cluster]
-        │     register the LDDMM template onto the surface,
-        │     transfer the template boundary -> contour vertex IDs
-        ▼
-  *_contour_ids.txt
-        │
-        │  [Stage 2 — pure numpy/scipy, runs anywhere]
-        │     route the contour along mesh edges into a closed barrier,
-        │     flood-fill into two regions, write surfaces
-        ▼
-  <name>.vtk   <name>_top.vtk   <name>_bottom.vtk   (ASCII, per subject)
+```mermaid
+flowchart TD
+    A["Thickness surfaces<br/>(grouped narrow / wide / weird)"] -->|"Stage 1<br/>build_group_templates"| B["3 averaged templates"]
+    C["Target surface (.byu)"] --> D
+    B --> D{"Stage 2 · register_best_of_3<br/>register to all 3 templates,<br/>keep the best-fitting"}
+    D -->|"contour IDs"| E["Stage 3 · finalize_cuts<br/>route contour on mesh,<br/>flood-fill, cut"]
+    E --> F["name.vtk · name_top.vtk · name_bottom.vtk<br/>(ASCII, per subject)"]
 ```
 
-Stage 2 is deliberately independent of the registration: the contour IDs are
-snapped onto the surface and re-routed along mesh edges, so a slightly loose
-registration still yields a clean, watertight cut.
+```
+ thickness surfaces (grouped narrow/wide/weird)
+        │  [Stage 1: build_group_templates.py]  -- once per population+hemisphere
+        ▼
+ 3 averaged templates (narrow/wide/weird)
+        │
+ target surface (.byu)
+        │  [Stage 2: register_best_of_3.py]  -- register to all 3, keep best fit
+        ▼
+ <name>_contour_ids.txt
+        │  [Stage 3: finalize_cuts.py]  -- route on mesh, flood-fill, cut
+        ▼
+ <name>.vtk   <name>_top.vtk   <name>_bottom.vtk   (ASCII, per subject)
+```
+
+Stages 1–2 need `py-lddmm` (run on a cluster/GPU). Stage 3 is pure numpy/scipy
+and runs anywhere; it is robust to a slightly loose registration because the
+contour is re-routed along the mesh edges.
 
 ---
 
@@ -41,106 +54,110 @@ registration still yields a clean, watertight cut.
 
 ```
 scripts/
-  ContourMappings.py        Stage 1: register template -> surfaces, write contour IDs (py-lddmm)
-  finalize_cuts.py          Stage 2: cut into top/bottom, output clean ASCII VTK by subject
-  cut_from_contour.py       Stage 2 (simpler variant): cut one or many, .byu output
-  contour_diagnostics.py    QC: feature-separation AUC + atlas-transfer feasibility checks
+  build_group_templates.py   Stage 1: averaged LDDMM template per shape group
+  register_best_of_3.py      Stage 2: register surface to all templates, keep most-balanced
+  finalize_cuts.py           Stage 3: cut into top/bottom; clean ASCII VTK per subject
+  ContourMappings.py         single-template variant (one template, no best-of-3)
+  cut_from_contour.py        simpler cut variant (.byu output; superseded by finalize_cuts.py)
+  contour_diagnostics.py     QC: feature-separation AUC + atlas-transfer feasibility
 docs/
-  ENVIRONMENT.md            Exact environment recipe (the dependency setup that works)
+  ENVIRONMENT.md             exact py-lddmm environment recipe (the setup that works)
 ```
+
+(No data files are included — surfaces/templates stay on the JHU system.)
 
 ---
 
-## Environment (Stage 1 only)
+## Usage
 
-Stage 1 needs `py-lddmm` and a specific set of dependencies. The full, tested
-recipe is in [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md). Short version, in a
-conda env on the cluster:
+Run Stages 1–2 on the cluster in the py-lddmm env, inside `screen`/`nohup`
+(both are slow on CPU; a GPU cuts it ~100x — keops uses it automatically).
 
+**Stage 1 — build the 3 templates** (once per population + hemisphere; merges
+folders with the same shape name, so CON + MCI pool automatically):
 ```bash
-pip install "pyfftw==0.13.1"   # prebuilt wheel (avoids compiling against system FFTW)
-pip install "pykeops==2.1.2"   # MUST be 2.1.2 — newer keops changed an API the code uses
-pip install meshpy
+python3 build_group_templates.py templates_BIOCARD_LH \
+  LH_CON_thickness/narrow LH_CON_thickness/wide LH_CON_thickness/weird \
+  LH_MCI_thickness/narrow LH_MCI_thickness/wide LH_MCI_thickness/weird
 ```
-and use the **`registration_old`** copy of py-lddmm (the newer one needs
-`ngsolve`, which this pipeline does not). Stage 2 needs only `numpy` + `scipy`.
 
----
-
-## Stage 1 — registration & contour transfer
-
-`scripts/ContourMappings.py`. Edit the CONFIG block at the top (project dir,
-input glob, output dir, template `.h5`), then run on the cluster:
-
+**Stage 2 — register each surface to best-of-3:**
 ```bash
-cd <your project dir>
-nohup python3 ContourMappings.py > batch.log 2>&1 &   # survives disconnects
-tail -f batch.log
+python3 register_best_of_3.py templates_BIOCARD_LH \
+  '/path/to/byu_tests/CON_LH/cut/*.byu' best_CON_LH
 ```
+Logs `OK <name> best=narrow/wide/weird balance=NN%` per surface.
 
-- `TEST_ONE = True` processes a single surface (use first, to sanity-check).
-  Set `False` to batch the whole input folder.
-- `MAXITER = 100` and `sigmaError = 0.25` are the validated settings
-  (good quality, ~8 min/surface on CPU). Lower `sigmaError` / raise `MAXITER`
-  for a tighter fit if ever needed (diminishing returns).
-- Output: one `*_contour_ids.txt` (and a `*_contour.vtk` preview) per surface.
-
-GPU note: keops uses CUDA automatically. On a GPU node this is ~100x faster;
-on CPU expect minutes per surface.
-
-## Stage 2 — cut & finalize
-
-`scripts/finalize_cuts.py`. Runs anywhere (no py-lddmm):
-
+**Stage 3 — cut into top/bottom (fast):**
 ```bash
-python3 finalize_cuts.py SURF_DIR CONTOUR_DIR OUTPUT_DIR
-# e.g.
-python3 finalize_cuts.py byu_tests/CON_LH auto_contours final_vtk
+python3 finalize_cuts.py byu_tests/CON_LH best_CON_LH final_CON_LH
 ```
-
-For each `<name>.byu` that has a matching `<name>_contour_ids.txt`, writes three
-**ASCII** VTK files into `OUTPUT_DIR/<subject>/`:
-
+Output (ASCII VTK), grouped by subject:
 ```
-final_vtk/
+final_CON_LH/
 └── BEIALE/
-    ├── BEIALE_150428_7.vtk          (original surface, byu -> vtk)
+    ├── BEIALE_150428_7.vtk          (original surface)
     ├── BEIALE_150428_7_top.vtk
     ├── BEIALE_150428_7_bottom.vtk
-    └── ... (more timepoints)
+    └── ...
 ```
 
-`<subject>` is the text before the first underscore. Surfaces with holes /
-non-manifold edges are skipped and logged; contours that fail to close are
-skipped and logged. Intermediate files (contour IDs, logs) are left in place —
-the output tree contains only the three surfaces per timepoint.
+---
+
+## Design notes (why it works)
+
+- **Shape-stratified templates.** A single template averaging very different
+  shapes is "blurry" and registers poorly to extreme surfaces (that caused
+  sliver cuts). Per-shape templates each register well; best-of-3 picks the
+  closest. *All* surfaces in a group are used to build its average.
+- **Surface-based, not subject-based.** Each surface is matched independently,
+  so a subject's timepoints can match different groups as the shape atrophies
+  over time.
+- **Match population & hemisphere.** Use BIOCARD templates on BIOCARD, ADNI on
+  ADNI; keep LH and RH separate (mirror images). Don't mix — it widens the
+  per-template variance the grouping is meant to reduce.
+- **Balance guard (data-grounded).** Real hand cuts have a smaller side of
+  35–50% (median 43%, over 198 cuts). `finalize_cuts.py` flags any cut whose
+  smaller side is < 35% as `SUSPECT` (likely a failed registration), and
+  `register_best_of_3.py` selects the most-balanced template per surface.
+- **Geometric top/bottom.** Labels are assigned by geometry (region with the
+  higher centroid along the axis of greatest separation = "top"), so they are
+  consistent across surfaces. Flip `TOP_IS_HIGHER` in `finalize_cuts.py` if your
+  convention is opposite.
 
 ---
 
-## QC
+## Results (validation vs manual cuts)
 
-`scripts/contour_diagnostics.py` — sanity checks used during development:
-`auc` mode measures how well candidate features separate contour vs interior
-vertices; `atlas` mode estimates contour-transfer feasibility between subjects.
+Auto cuts compared to expert hand cuts on the BIOCARD CON_LH set. Agreement =
+fraction of the surface assigned to the same side as the manual cut (label-flip
+invariant).
 
----
+| Metric | Value |
+|---|---|
+| Surfaces compared (BIOCARD CON_LH) | 78 |
+| Median agreement with manual cut | **93%** |
+| Mean agreement | 91% |
+| 90% of cases above | ~85% |
+| Auto cut smaller-side balance | 45–48% (manual: 35–50%) |
+| Flagged degenerate (`SUSPECT`) | 1 / 78 |
 
-## Notes & caveats
+The single flagged case and a handful of lower-agreement subjects (e.g. BIRBAR,
+some SCHJAN) are the candidates for review/manual touch-up.
 
-- **Template type vs target type.** The bundled template is an open ERC *patch*;
-  the test surfaces are *closed*. Registering a patch onto a closed surface
-  localises well but the contour line can sit slightly off — Stage 2's on-mesh
-  routing absorbs this, but for best placement consider re-estimating a template
-  from closed surfaces, or a closed→closed reference.
-- **The template is fixed.** Processing surfaces does NOT update the template;
-  each surface is registered independently for reproducibility.
-- **Tuning.** Placement is governed by the registration (`sigmaError`,
-  `MAXITER`), not the cut. The cut itself is robust to a loose contour.
+## Environment & compute
+
+- See [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) for the exact py-lddmm setup
+  (uses the older py-lddmm; `pyfftw==0.13.1`, `pykeops==2.1.2`, `meshpy`; template
+  building stubs out `pygalmesh`).
+- CPU timing: template build ≈ ~15 h per set; registration ≈ ~25 min/surface
+  (best-of-3). A GPU node (keops auto-detects CUDA) reduces this by ~100x with
+  no code changes — strongly recommended for full batches.
 
 ---
 
 ## Credits
 
-LDDMM registration: `py-lddmm` by Laurent Younes (JHU). Pipeline, contour
-transfer, and cutting tools by Jiabei Li. Surface-cutting concept adapted from
-the Center for Imaging Science workflow.
+LDDMM registration: `py-lddmm` by Laurent Younes (JHU). Pipeline (shape-stratified
+template transfer, best-of-3 selection, on-mesh cutting) and validation by
+Jiabei Li. Distributed under BSD-3-Clause (see `LICENSE`).

@@ -134,12 +134,30 @@ def process(byu, ids_path, outdir):
         rm = {v: i for i, v in enumerate(vids)}
         return V[vids], np.array([[rm[v] for v in F[fi]] for fi in keep])
 
+    # degenerate-cut guard. Real hand cuts have smaller side 35-50% (median ~43%,
+    # measured over 198 manual cuts), so anything below ~35% is a failed registration.
+    SUSPECT_MIN_FRACTION = 0.35
+    small = min(len(A), len(B)) / float(len(A) + len(B))
+
+    # Deterministic top/bottom by GEOMETRY (flood-fill order is arbitrary).
+    # The region whose centroid is higher along the axis where the two regions
+    # differ most is called "top". If your convention is opposite, set False.
+    TOP_IS_HIGHER = True
+    cA = V[lab == 0].mean(0); cB = V[lab == 1].mean(0)
+    ax = int(np.argmax(np.abs(cA - cB)))
+    a_is_top = (cA[ax] >= cB[ax]) if TOP_IS_HIGHER else (cA[ax] < cB[ax])
+    top_region, bot_region = (0, 1) if a_is_top else (1, 0)
     subdir = os.path.join(outdir, subject)
     os.makedirs(subdir, exist_ok=True)
     write_vtk_ascii(os.path.join(subdir, name + ".vtk"), V, F)          # original
-    Vt, Ft = submesh(0); write_vtk_ascii(os.path.join(subdir, name + "_top.vtk"), Vt, Ft)
-    Vb, Fb = submesh(1); write_vtk_ascii(os.path.join(subdir, name + "_bottom.vtk"), Vb, Fb)
-    print("OK   %s/%s  (orig + top %d / bottom %d faces)" % (subject, name, len(Ft), len(Fb)))
+    Vt, Ft = submesh(top_region); write_vtk_ascii(os.path.join(subdir, name + "_top.vtk"), Vt, Ft)
+    Vb, Fb = submesh(bot_region); write_vtk_ascii(os.path.join(subdir, name + "_bottom.vtk"), Vb, Fb)
+    if small < SUSPECT_MIN_FRACTION:
+        print("SUSPECT %s/%s  lopsided cut (smaller side %.0f%% < %.0f%%) -- likely bad registration"
+              % (subject, name, small * 100, SUSPECT_MIN_FRACTION * 100))
+        return "suspect"
+    print("OK   %s/%s  (top %d / bottom %d faces, smaller side %.0f%%)"
+          % (subject, name, len(Ft), len(Fb), small * 100))
     return True
 
 
@@ -147,17 +165,24 @@ def main():
     if len(sys.argv) != 4:
         print(__doc__); sys.exit(1)
     surf_dir, cont_dir, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
-    n_ok = n_skip = 0
+    n_ok = n_skip = 0; suspects = []
     for byu in sorted(glob.glob(os.path.join(surf_dir, '**', '*.byu'), recursive=True)):
         name = os.path.splitext(os.path.basename(byu))[0]
         ids = os.path.join(cont_dir, name + '_contour_ids.txt')
         if not os.path.isfile(ids):
             print("SKIP %s: no contour ids" % name); n_skip += 1; continue
-        if process(byu, ids, outdir):
+        r = process(byu, ids, outdir)
+        if r == "suspect":
+            n_ok += 1; suspects.append(name)
+        elif r:
             n_ok += 1
         else:
             n_skip += 1
     print("\nDone: %d surfaces -> %s/<subject>/  | %d skipped" % (n_ok, outdir, n_skip))
+    if suspects:
+        print("\n%d SUSPECT (lopsided) cuts to review/redo:" % len(suspects))
+        for s in suspects:
+            print("   " + s)
 
 
 if __name__ == "__main__":
